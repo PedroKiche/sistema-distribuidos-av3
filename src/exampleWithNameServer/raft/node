@@ -1,0 +1,90 @@
+import Pyro5.api
+import sys
+import random
+import threading
+from timer import Timer
+import json
+
+peers = ["","","",""]
+
+@Pyro5.api.expose
+class NodeObject(object):
+    def __init__(self, port, name):
+        self.myname = name
+        self.myport = port
+        self.is_leader = False
+        self.time_to_canditate = random.randdouble(150,300)
+        self.nameserver = Pyro5.api.locate_ns()
+        self.term = 0
+
+        self.data = None
+
+        self.my_leader = None
+
+        self.timer = Timer()
+
+        self.candidate_thread = threading.Timer(self.timeout_counter, self.cadidate_self)
+
+        self.leader_thread = threading.Timer(100,self.send_msg)
+
+
+        self.candidate_thread.start()
+        self.leader_thread.start()
+        
+    
+    def request_vote(self,term):
+        if term>self.term:
+            return True
+        False
+
+    def cadidate_self(self):
+        vote_count = 1
+        for peer_name in peers:
+            if(peer_name != f"pyro:{self.myname}@localhost:{self.myport}"):
+                peer=Pyro5.api.Proxy(peer_name)
+                vote_count += peer.request_vote(self.term)
+        if vote_count > len(peer_name)/2:
+            self.ns.register("lider", f"pyro:{self.myname}@localhost:{self.myport}")
+            self.is_leader = True
+            self.my_leader = self.myname
+            self.term += 1
+    
+    def receive_msg(self,message):
+        leader_message = json.loads(message)
+        self.my_leader = leader_message.get("leader_name")
+        self.term = leader_message("leadert_term")
+
+        self.candidate_thread.cancel()
+        self.candidate_thread = threading.Timer(self.timeout_counter, self.cadidate_self)
+        self.candidate_thread.start()        
+
+    def send_msg(self):
+        for peer_name in peers:
+            if(peer_name != f"pyro:{self.myname}@localhost:{self.myport}"):
+                peer=Pyro5.api.Proxy(peer_name)
+                peer.receive_msg(json.dumps({"leader_name": self.myname, "leader_term": self.term}))
+        self.leader_thread.cancel()
+        self.leader_thread = threading.Timer(100,self.send_msg)
+        self.leader_thread.start()
+
+    def set_data(self, data):
+        ack = 0
+        for peer_name in peers:
+            if(peer_name != f"pyro:{self.myname}@localhost:{self.myport}" and self.is_leader):
+                peer=Pyro5.api.Proxy(peer_name)
+                ack = ack + peer.set_data(data)
+        if(ack > len(peer_name)/2 and self.is_leader):
+            self.data = data
+        else: return True
+
+
+def main(port, nodeName):
+    daemon = Pyro5.server.Daemon(port=int(port))
+    uri = daemon.register(NodeObject(port=port, name=nodeName), nodeName)
+    daemon.requestLoop()
+    
+
+
+if __name__ == "__main__":
+    port, nodeName = sys.argv[1], sys.argv[2]
+    main(port, nodeName)
