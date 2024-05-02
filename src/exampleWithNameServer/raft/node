@@ -2,10 +2,8 @@ import Pyro5.api
 import sys
 import random
 import threading
-from timer import Timer
+import time
 import json
-
-peers = ["","","",""]
 
 @Pyro5.api.expose
 class NodeObject(object):
@@ -13,78 +11,107 @@ class NodeObject(object):
         self.myname = name
         self.myport = port
         self.is_leader = False
-        self.time_to_canditate = random.randdouble(150,300)
-        self.nameserver = Pyro5.api.locate_ns()
+        self.time_to_canditate = random.randint(3,10)
+        self.voted = False
+        # self.nameserver = Pyro5.api.locate_ns()
         self.term = 0
+        self.peers = ["PYRO:node1@localhost:8001"
+         ,"PYRO:node2@localhost:8002"
+         ,"PYRO:node3@localhost:8003"
+         ,"PYRO:node4@localhost:8004"]
 
         self.data = None
+        self.uncommited_data = None
 
         self.my_leader = None
 
-        self.timer = Timer()
+        self.candidate_thread = threading.Timer(self.time_to_canditate, self.cadidate_self)
 
-        self.candidate_thread = threading.Timer(self.timeout_counter, self.cadidate_self)
-
-        self.leader_thread = threading.Timer(100,self.send_msg)
+        self.leader_thread = threading.Timer(1/10,self.send_hearbeat)
 
 
         self.candidate_thread.start()
-        self.leader_thread.start()
         
     
     def request_vote(self,term):
-        if term>self.term:
+        if term>self.term and not self.voted:
+            self.voted = True
             return True
-        False
+        return False
 
     def cadidate_self(self):
         vote_count = 1
-        for peer_name in peers:
-            if(peer_name != f"pyro:{self.myname}@localhost:{self.myport}"):
+        self.term = self.term+1
+        self.voted = True
+        for peer_name in self.peers:
+            if(peer_name != f"PYRO:{self.myname}@localhost:{self.myport}"):
                 peer=Pyro5.api.Proxy(peer_name)
-                vote_count += peer.request_vote(self.term)
-        if vote_count > len(peer_name)/2:
-            self.ns.register("lider", f"pyro:{self.myname}@localhost:{self.myport}")
+                vote_count = vote_count + peer.request_vote(self.term)
+        if vote_count > len(self.peers)/2:
+            print(f"PYRO:{self.myname}@localhost:{self.myport}")
+            nameserver = Pyro5.api.locate_ns()
+            nameserver.register("lider", f"PYRO:{self.myname}@localhost:{self.myport}")
             self.is_leader = True
             self.my_leader = self.myname
-            self.term += 1
+            print(f"I am the leader, my name is {self.myname} and my term is {self.term}")
+            self.leader_thread.start()
     
-    def receive_msg(self,message):
+    def receive_hearbeat(self,message):
+        self.voted = False
         leader_message = json.loads(message)
         self.my_leader = leader_message.get("leader_name")
-        self.term = leader_message("leadert_term")
+        self.term = leader_message.get("leader_term")
 
         self.candidate_thread.cancel()
-        self.candidate_thread = threading.Timer(self.timeout_counter, self.cadidate_self)
-        self.candidate_thread.start()        
+        self.candidate_thread = threading.Timer(self.time_to_canditate, self.cadidate_self)
+        if not self.is_leader: self.candidate_thread.start()        
 
-    def send_msg(self):
-        for peer_name in peers:
-            if(peer_name != f"pyro:{self.myname}@localhost:{self.myport}"):
+    def send_hearbeat(self):
+        self.voted = False
+        for peer_name in self.peers:
+            if(peer_name != f"PYRO:{self.myname}@localhost:{self.myport}"):
                 peer=Pyro5.api.Proxy(peer_name)
-                peer.receive_msg(json.dumps({"leader_name": self.myname, "leader_term": self.term}))
+                peer.receive_hearbeat(json.dumps({"leader_name": self.myname, "leader_term": self.term}))
         self.leader_thread.cancel()
-        self.leader_thread = threading.Timer(100,self.send_msg)
-        self.leader_thread.start()
+        self.leader_thread = threading.Timer(1/10,self.send_hearbeat)
+        if self.is_leader: self.leader_thread.start()
 
     def set_data(self, data):
         ack = 0
-        for peer_name in peers:
-            if(peer_name != f"pyro:{self.myname}@localhost:{self.myport}" and self.is_leader):
-                peer=Pyro5.api.Proxy(peer_name)
-                ack = ack + peer.set_data(data)
-        if(ack > len(peer_name)/2 and self.is_leader):
-            self.data = data
-        else: return True
+        if self.is_leader: 
+            self.uncommited_data = data
+            print(f"message {data} received by leader {self.myname}")
+            for peer_name in self.peers:
+                if(peer_name != f"PYRO:{self.myname}@localhost:{self.myport}"):
+                    peer=Pyro5.api.Proxy(peer_name)
+                    ack = ack + (1 if peer.set_data(data) else 0)
+            if(ack > len(self.peers)/2):
+                self.data = self.uncommited_data
+                print(f"message {data} commited by leader {self.myname}")
+                for peer_name in self.peers:
+                    if(peer_name != f"PYRO:{self.myname}@localhost:{self.myport}"):
+                        peer=Pyro5.api.Proxy(peer_name)
+                        peer.set_data(data)
+                return f"message {data} commited by leader {self.myname}"
+            elif(ack <= len(self.peers)/2): 
+                print(f"message: {data} not commited by {self.myname}, not enough votes")
+                return "Uncommited, not enough votes"
+        else:
+            if self.uncommited_data == data: 
+                print(f"message {data} commited by follower {self.myname}")
+                self.data = data
+            else:
+                print(f"message {data} received by follower {self.myname}")
+                self.uncommited_data = data
+            return True
 
 
 def main(port, nodeName):
     daemon = Pyro5.server.Daemon(port=int(port))
     uri = daemon.register(NodeObject(port=port, name=nodeName), nodeName)
     daemon.requestLoop()
-    
-
 
 if __name__ == "__main__":
+    time.sleep(5)
     port, nodeName = sys.argv[1], sys.argv[2]
     main(port, nodeName)
